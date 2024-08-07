@@ -11,7 +11,7 @@ from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
 
 def find_local_maxima(data, order, numMax, min_dose):
-    size = 1 + 2 * order # Side length of the cube
+    size = 1 + 2 * order # Side length of the neighbourhood cube we search in
     fp = np.ones((size, size, size)) # Create a 3D matrix named footprint
     fp[order, order, order] = 0 # The center of the footprint cube is set to 0
 
@@ -21,6 +21,7 @@ def find_local_maxima(data, order, numMax, min_dose):
     coords = np.asarray(np.where(mask)).T
     values = data[mask]
 
+    # Sort the neighbourhood by variance
     local_var = []
     for coord in coords:
         slices = tuple(slice(max(0, c-order), min(s, c+order+1)) for c,s in zip(coord, data.shape))
@@ -30,6 +31,7 @@ def find_local_maxima(data, order, numMax, min_dose):
 
     local_var = np.array(local_var)
 
+    # Only take the local maxima indices that has a dosage larger than the minimum
     valid_indices = values >= min_dose
     coords = coords[valid_indices]
     values = values[valid_indices]
@@ -43,6 +45,7 @@ def find_local_maxima(data, order, numMax, min_dose):
         # Sort by variance and select top 3
         top_ind = np.argsort(local_var)[-1*numMax:]
     
+    # Return the coordinates, values, and variance of  coordinates
     top_coords = coords[top_ind]
     top_val = values[top_ind]
     top_var = local_var[top_ind]
@@ -50,11 +53,14 @@ def find_local_maxima(data, order, numMax, min_dose):
     return top_coords, top_val, top_var
 
 def dist(coord1, coord2):
+    # Euclidean distance function
     return math.sqrt((coord1[0]-coord2[0])**2 + (coord1[1]-coord2[1])**2 + (coord1[2]-coord2[2])**2)
 
 def elbow(coords, ub):
+    # Elbow method used to decide how many clusters the kMeans clustering should take on
     data = list(coords)
     if(ub > len(coords)):
+        # If upper bound of clusters is smaller than number of coordinates (we can't have 5 clusters with only one point)
         print("Upper bound cluster is greater than number of data points")
         ub = len(coords)
         if ub == 1:
@@ -98,6 +104,7 @@ def dbscan_get_clusters(data, eps, min_samples):
     return clusters
 
 def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
+    # Visualize the different clusters against the clinically selected isocenters
     x, y, z = max_ind
     fig, ax = plt.subplots(figsize=(15, 5))
     cax1 = ax.imshow(dose_arr[:, :, z], cmap='viridis')
@@ -105,7 +112,7 @@ def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
     ax.axis('off')
     fig.colorbar(cax1, ax=ax, orientation='vertical', shrink=0.8)
 
-    colors = ['red', 'green', 'cyan', 'black', 'magenta', 'yellow', 'white', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'navy']
+    colors = ['red', 'green', 'cyan', 'magenta', 'yellow', 'white', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'navy']
     i = 1
     for cluster in clusters:
         cluster_proj = np.array([point[:2] for point in cluster])
@@ -123,6 +130,7 @@ def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
     plt.show()
 
 def extract_isocenters(isocenter_path):
+    # Return the list of clinically selected isocenters to be graphed against algorithmically searched ones 
     isocenters = pd.read_csv(isocenter_path, header=None)
     isocenter_list = isocenters.values.tolist()
     return isocenter_list
