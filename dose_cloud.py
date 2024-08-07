@@ -9,6 +9,11 @@ import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
 from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
+import gurobipy as gp
+from patient_def import Patient
+from utils import build_dense
+from constants_def import ModelParameters
+
 
 def find_local_maxima(data, order, numMax, min_dose):
     size = 1 + 2 * order # Side length of the neighbourhood cube we search in
@@ -128,6 +133,200 @@ def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
     output_file = 'isocenter_cluster_C0006.png'  # Specify the file name and format
     fig.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.show()
+
+def isocenter_set(dose_arr, clusters):
+    isocenters = []
+
+    for cluster in clusters:
+        if not cluster:
+            continue
+        max_val = -np.inf
+        best_maxima = None
+        for maxima in cluster:
+            val = dose_arr[maxima[0], maxima[1], maxima[2]]
+            if val > max_val:
+                max_val = val
+                best_maxima = maxima
+        
+        if best_maxima is not None:
+            isocenters.append(best_maxima)
+    
+    isocenters_array = np.array(isocenters)
+    return isocenters_array
+
+def shift_kernel(isocenters):
+    
+
+def optimize(patient_path, isocenters, identifier):
+    # The optimization function that returns the duration of each kernel and objective value
+    # Inputs include 1. patient_path: folder containing all patient info
+    # 2. isocenters: a numpy array of updated isocenter coordinates
+    # 3. identifier: patient_identifer such as 'C0006'
+    cs = ModelParameters()
+
+    pred_doses = [predictions for predictions in os.listdir(patient_path) if 'predict' in predictions]
+    ptvlst = [ptv[7:-12].split('_') for ptv in pred_doses]
+
+    for idx, rois in enumerate(ptvlst):
+        dose = sp.COO(build_dense(pd.read_csv(os.path.join(patient_path, pred_doses[idx]))))
+        structure_masks = {key: sp.COO(build_dense(pd.read_csv(patient_path + '\\' + key + '.csv')))
+                            for key in rois}
+
+        files = [f for f in os.listdir(patient_path)
+                    if (os.path.isfile(os.path.join(patient_path, f)) and 'kernel' in f)]
+        files = natsort.natsorted(files)
+
+        all_kernels = [sp.load_npz(os.path.join(patient_path, i)) for i in files]
+
+        voxel_dimensions = (0.5, 0.5, 1)
+
+        isocenter_indices = isocenters
+
+        patient = Patient(cs,
+                    identifier,
+                    patient_path,
+                    dose,
+                    rois,
+                    structure_masks,
+                    all_kernels,
+                    voxel_dimensions,
+                    isocenter_indices)
+
+        # building the inverse optimization model
+        # get the list of kernels, only for voxels inside the optimization structures of the tumor
+        klst = patient.sampled_dij
+        # get the list of targets and convert the voxel locations to dictionary format
+        targ_dok_lst = [sp.DOK.from_coo(patient.structure_masks[region]) for region in rois]
+        targ_dok = sum(targ_dok_lst)
+        # separate the voxels into voxels in the target, s_shell and g_shell
+        targ = {x: targ_dok.data[x] for x in patient.sampled_voxels if x in targ_dok.data}
+        s_shell = patient.opt_structures[0]
+        g_shell = patient.opt_structures[1]
+        # get a dose map for only the sampled voxels
+        d = patient.sampled_dose
+
+        # get all isocenter indices as a list of tuples
+        iso_lst = [tuple(iso) for iso in patient.isocenters_indices]
+
+        # obtain number of isocenters in the target as well as volume of the tumor for time estimation
+        num_iso = len({x: targ_dok.data[x] for x in iso_lst if x in targ_dok.data})
+        volume = len(targ)*0.25/1000
+
+        # set threshold values for optimization
+        dt = list(targ_dok.data.values())[0]
+        ds = list(targ_dok.data.values())[0]
+        dg = dt/2
+        dt2 = dt*2
+
+        nt = len(targ)
+        ns = len(s_shell)
+        ng = len(g_shell)
+
+        # set values to be used in inverse optimization
+        y_minus_t = sum({k: max(dt - d[k], 0) for k in d if k in targ}.values())
+        y_plus_s = sum({k: max(d[k] - ds, 0) for k in d if k in s_shell}.values())
+        y_plus_g = sum({k: max(d[k] - dg, 0) for k in d if k in g_shell}.values())
+        y_time_max = 5.135 * dt - 57.479 * volume + 19.83 * num_iso - 21.5543
+        y_plus_t2 = sum({k: max(d[k] - dt2, 0) for k in d if k in targ}.values())
+
+        print('Building inverse model')
+        m = gp.Model()
+        p_t = m.addVars(targ, lb=-float('inf'), ub=float('inf'), name='targ')
+        p_s = m.addVars(s_shell, lb=-float('inf'), ub=float('inf'), name='s_shell')
+        p_g = m.addVars(g_shell, lb=-float('inf'), ub=float('inf'), name='g_shell')
+        p_t2 = m.addVars(targ, lb=-float('inf'), ub=float('inf'), name='targ2')
+
+        wt = m.addVar(name='wt')
+        ws = m.addVar(name='ws')
+        wg = m.addVar(name='wg')
+        wt2 = m.addVar(name='wt2')
+        wbot = m.addVar(name='wbot')
+
+        for kernel in range(len(klst)):
+            m.addConstr(wbot >= gp.quicksum([sum(klst[kernel][i] * p_t[i] for i in targ.keys()),
+                                                sum(klst[kernel][j] * p_s[j] for j in s_shell.keys()),
+                                                sum(klst[kernel][k] * p_g[k] for k in g_shell.keys()),
+                                                sum(klst[kernel][pt2l] * p_t2[pt2l] for pt2l in targ.keys())]))
+
+        for key in targ.keys():
+            m.addConstr(-p_t[key] <= 0)
+            m.addConstr(p_t[key] <= wt / (nt * dt))
+            m.addConstr(-p_t2[key] <= wt2 / (nt * dt2))
+            m.addConstr(p_t2[key] <= 0)
+        for key2 in s_shell.keys():
+            m.addConstr(-p_s[key2] <= ws / (ns * ds))
+            m.addConstr(p_s[key2] <= 0)
+        for key3 in g_shell.keys():
+            m.addConstr(-p_g[key3] <= wg / (ng * dg))
+            m.addConstr(p_g[key3] <= 0)
+
+        m.addConstr(dt * gp.quicksum(p_t) +
+                    ds * gp.quicksum(p_s) +
+                    dg * gp.quicksum(p_g) +
+                    dt2 * gp.quicksum(p_t2) == 1)
+
+        m.setObjective((wt / (nt * dt)) * y_minus_t +
+                        (ws / (ns * ds)) * y_plus_s +
+                        (wg / (ng * dg)) * y_plus_g +
+                        (wt2 / (ng * dt2)) * y_plus_t2 +
+                        wbot * y_time_max)
+
+        m.optimize()
+
+        # output weights from inverse optimization
+        weights = [var.x for var in m.getVars() if "w" in var.VarName]
+        print('weights =', weights)
+        print('obj =', m.getObjective().getValue())
+
+        # build the forward model using the weights from the inverse
+        print('Building forward model')
+        # forward model
+        n = gp.Model()
+        yt_minus = n.addVars(targ, name='yt_minus')
+        yt_plus = n.addVars(targ, name='yt_plus')
+        ys_minus = n.addVars(s_shell, name='ys_minus')
+        ys_plus = n.addVars(s_shell, name='ys_plus')
+        yg_minus = n.addVars(g_shell, name='yg_minus')
+        yg_plus = n.addVars(g_shell, name='yg_plus')
+        yt2_minus = n.addVars(targ, name='yt2_minus')
+        yt2_plus = n.addVars(targ, name='yt2_plus')
+
+        t = n.addVars(len(klst), name='time')
+
+        for voxel in targ.keys():
+            n.addConstr(
+                gp.quicksum(klst[i][voxel] * t[i] for i in range(len(klst))) - yt_plus[voxel] + yt_minus[voxel] == dt)
+
+        for voxel in s_shell.keys():
+            n.addConstr(
+                gp.quicksum(klst[i][voxel] * t[i] for i in range(len(klst))) - ys_plus[voxel] + ys_minus[voxel] == ds)
+
+        for voxel in g_shell.keys():
+            n.addConstr(
+                gp.quicksum(klst[i][voxel] * t[i] for i in range(len(klst))) - yg_plus[voxel] + yg_minus[voxel] == dg)
+
+        for voxel in targ.keys():
+            n.addConstr(
+                gp.quicksum(klst[i][voxel] * t[i] for i in range(len(klst))) - yt2_plus[voxel] + yt2_minus[voxel] == dt2)
+
+        n.setObjective((weights[0] / (nt * dt)) * gp.quicksum(yt_minus) +
+                        (weights[1] / (ns * ds)) * gp.quicksum(ys_plus) +
+                        (weights[2] / (ng * dg)) * gp.quicksum(yg_plus) +
+                        (weights[3] / (nt * dt2)) * gp.quicksum(yt2_plus) +
+                        (weights[4]) * gp.quicksum(t))
+
+        n.optimize()
+        decisions = [var.x for var in n.getVars() if "time" in var.VarName]
+        print(len(decisions))
+        # print(decisions)
+
+        # output the times for each beam from the inverse model as a csv file
+        os.chdir(patient_path)
+        with open('inverse_' + rois[0] + '.csv', 'w') as f:
+            writer = csv.writer(f, lineterminator='\n')
+            for val in decisions:
+                writer.writerow([val])
+
 
 def extract_isocenters(isocenter_path):
     # Return the list of clinically selected isocenters to be graphed against algorithmically searched ones 
