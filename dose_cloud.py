@@ -164,7 +164,7 @@ def shift_kernel(patient_path, isocenters, identifier):
     reference = past_isocenters[0]
 
     files = [f for f in os.listdir(patient_path)
-            if (os.path.isfile(os.path.join(patient_path, f)) and 'kernel' in f)]
+            if (os.path.isfile(os.path.join(patient_path, f)) and 'kernel' in f and '_0_' in f)]
     files = natsort.natsorted(files)
 
     os.chdir(patient_path)
@@ -200,7 +200,6 @@ def shift_kernel(patient_path, isocenters, identifier):
         for isocenter in isocenters:
             writer.writerow(isocenter)
     return
-
 
 def optimize(patient_path, isocenters, identifier):
     # The optimization function that returns the duration of each kernel and objective value
@@ -361,6 +360,7 @@ def optimize(patient_path, isocenters, identifier):
                         (weights[4]) * gp.quicksum(t))
 
         n.optimize()
+        print(f"THE OJECTIVE FUNCTION EVALUATES TO {n.objVal}")
         decisions = [var.x for var in n.getVars() if "time" in var.VarName]
         print(len(decisions))
         # print(decisions)
@@ -372,6 +372,7 @@ def optimize(patient_path, isocenters, identifier):
             for val in decisions:
                 writer.writerow([val])
 
+        return n.objVal
 
 def extract_isocenters(isocenter_path):
     # Return the list of clinically selected isocenters to be graphed against algorithmically searched ones 
@@ -435,12 +436,12 @@ if __name__ == '__main__':
     # print(len(clusters[0]))
     # print(f"Coordinates in the second cluster is: {clusters[1]}")
     # print(len(clusters[1]))
-    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
-    visualize_clusters(dose_arr, max_ind, clusters, isocenters)
+    # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+    # visualize_clusters(dose_arr, max_ind, clusters, isocenters)
 
-    clusters = dbscan_get_clusters(coords, 50, 5)
-    for cluster_label, cluster_points in clusters.items():
-        print(f"Cluster {cluster_label}: {cluster_points}")
+    # clusters = dbscan_get_clusters(coords, 50, 5)
+    # for cluster_label, cluster_points in clusters.items():
+    #     print(f"Cluster {cluster_label}: {cluster_points}")
 
     # x, y, z = max_ind
     # fig, axs = plt.subplots(1, 3, figsize=(15, 5))
@@ -463,3 +464,8 @@ if __name__ == '__main__':
     # fig.savefig(output_file, dpi=300, bbox_inches='tight')
 
     # plt.show()
+
+
+    updated_isocenters = isocenter_set(dose_arr, clusters)
+    shift_kernel(patient_path, updated_isocenters, 'C0006')
+    optimize(patient_path, updated_isocenters, 'C0006')
