@@ -426,6 +426,11 @@ if __name__ == '__main__':
         num_cluster = elbow(coords,10)
         clusters = kmeans_get_clusters(coords, num_cluster)
 
+        # If we want to visualize the clusters vs original isocenters
+        # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+        # visualize_clusters(dose_arr, max_ind, clusters, isocenters)
+
+
         updated_isocenters = isocenter_set(dose_arr, clusters)
         shift_kernel(patient_path, updated_isocenters, 'C0006')
         obj_val = optimize(patient_path, updated_isocenters, 'C0006')
