@@ -154,8 +154,53 @@ def isocenter_set(dose_arr, clusters):
     isocenters_array = np.array(isocenters)
     return isocenters_array
 
-def shift_kernel(isocenters):
+def shift_kernel(patient_path, isocenters, identifier):
+    # Inputs include 1. patient_path: folder containing all patient info
+    # 2. reference: the reference isocenter from previous iteration and the isocenter previous kernel shifts are based on
+    # 3. isocenters: a numpy array of updated isocenter coordinates
+    # 4. identifier: a string used for composing the file names, usually in the format of 'C0006'
+    past_isocenters = pd.read_csv(patient_path + '\\' + 'adj_isocenters.csv', header=None)
+    past_isocenters = past_isocenters.values.tolist()
+    reference = past_isocenters[0]
+
+    files = [f for f in os.listdir(patient_path)
+            if (os.path.isfile(os.path.join(patient_path, f)) and 'kernel' in f)]
+    files = natsort.natsorted(files)
+
+    os.chdir(patient_path)
     
+    if len(isocenters) > 1:
+        for i in range(1, len(isocenters)):
+            j = 1
+            for file in files:
+                k_file = sp.load_npz(patient_path + '\\' + file).todense()
+                shifted_k = np.roll(k_file, shift=isocenters[0][0] - reference[0], axis=0)
+                shifted_k = np.roll(shifted_k, shift=isocenters[0][1] - reference[1], axis=1)
+                shifted_k = np.roll(shifted_k, shift=isocenters[0][2] - reference[2], axis=2) 
+
+                sparse_k = sp.COO(shifted_k)
+                sp.save_npz('kernels_' + identifier[1:] + '_' + str(i) + "_" + str(j) + '.npz', sparse_k)
+                j+=1
+
+    i = 1
+    for file in files:
+        k_file = sp.load_npz(patient_path + '\\' + file).todense()
+        shifted_k = np.roll(k_file, shift=isocenters[0][0] - reference[0], axis=0)
+        shifted_k = np.roll(shifted_k, shift=isocenters[0][1] - reference[1], axis=1)
+        shifted_k = np.roll(shifted_k, shift=isocenters[0][2] - reference[2], axis=2)
+            
+        sparse_k = sp.COO(shifted_k)
+        sp.save_npz('kernels_' + identifier[1:] + '_0_' + str(i) + '.npz', sparse_k)
+        i+=1
+    
+    csv_file_path = patient_path + '\\' + 'adj_isocenters.csv'
+    with open(csv_file_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+
+        for isocenter in isocenters:
+            writer.writerow(isocenter)
+    return
+
 
 def optimize(patient_path, isocenters, identifier):
     # The optimization function that returns the duration of each kernel and objective value
