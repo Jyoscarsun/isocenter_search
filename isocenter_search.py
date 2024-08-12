@@ -68,7 +68,7 @@ def elbow(coords, ub):
         # If upper bound of clusters is smaller than number of coordinates (we can't have 5 clusters with only one point)
         print("Upper bound cluster is greater than number of data points")
         ub = len(coords)
-        if ub == 1:
+        if ub == 1 or ub == 2:
             return ub
     inertia = []
 
@@ -108,7 +108,7 @@ def dbscan_get_clusters(data, eps, min_samples):
             clusters[label] = data[labels == label].tolist()
     return clusters
 
-def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
+def visualize_clusters(dose_arr, max_ind, clusters, isocenters, identifier):
     # Visualize the different clusters against the clinically selected isocenters
     x, y, z = max_ind
     fig, ax = plt.subplots(figsize=(15, 5))
@@ -123,14 +123,14 @@ def visualize_clusters(dose_arr, max_ind, clusters, isocenters):
         cluster_proj = np.array([point[:2] for point in cluster])
         print(cluster_proj)
         if cluster_proj.size > 0:
-            ax.scatter(cluster_proj[:, 0], cluster_proj[:, 1], c=colors[i-1], s=30, label=f"Cluster {i}")
+            ax.scatter(cluster_proj[:, 1], cluster_proj[:, 0], c=colors[i-1], s=30, label=f"Cluster {i}")
         i += 1
 
     isocenter_proj = np.array([point[:2] for point in isocenters])
-    ax.scatter(isocenter_proj[:, 0], isocenter_proj[:, 1], c='black', s=10, label="Clinical Isocenters")
+    ax.scatter(isocenter_proj[:, 1], isocenter_proj[:, 0], c='black', s=10, label="Clinical Isocenters")
 
     ax.legend(loc='upper right')
-    output_file = 'isocenter_cluster_C0006.png'  # Specify the file name and format
+    output_file = 'isocenter_cluster_' + identifier + '.png'  # Specify the file name and format
     fig.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.show()
 
@@ -161,6 +161,7 @@ def shift_kernel(patient_path, isocenters, identifier):
     # 4. identifier: a string used for composing the file names, usually in the format of 'C0006'
     past_isocenters = pd.read_csv(patient_path + '\\' + 'adj_isocenters.csv', header=None)
     past_isocenters = past_isocenters.values.tolist()
+    num_isocenter_orig = len(past_isocenters)
     reference = past_isocenters[0]
 
     files = [f for f in os.listdir(patient_path)
@@ -168,30 +169,47 @@ def shift_kernel(patient_path, isocenters, identifier):
     files = natsort.natsorted(files)
 
     os.chdir(patient_path)
+
+    num_isocenter = len(isocenters)
+    npz_delete = []
+    if num_isocenter_orig > num_isocenter:
+        for i in range(num_isocenter, num_isocenter_orig):
+            for j in range(1, 25, 1):
+                npz_delete.append("kernels_" + identifier[1:] + "_" + str(i) + "_" + str(j) + ".npz")
+        
+        for file in npz_delete:
+            file_path = os.path.join(patient_path, file)
+            try:
+                os.remove(file_path)
+                print(f"Deleted: {file_path}")
+            except FileNotFoundError:
+                print(f"File not found: {file_path}")
+            except Exception as e:
+                print(f"Error deleting {file_path}: {e}")
     
     if len(isocenters) > 1:
         for i in range(1, len(isocenters)):
             j = 1
             for file in files:
                 k_file = sp.load_npz(patient_path + '\\' + file).todense()
-                shifted_k = np.roll(k_file, shift=isocenters[0][0] - reference[0], axis=0)
-                shifted_k = np.roll(shifted_k, shift=isocenters[0][1] - reference[1], axis=1)
-                shifted_k = np.roll(shifted_k, shift=isocenters[0][2] - reference[2], axis=2) 
+                shifted_k = np.roll(k_file, shift=isocenters[i][0] - reference[0], axis=0)
+                shifted_k = np.roll(shifted_k, shift=isocenters[i][1] - reference[1], axis=1)
+                shifted_k = np.roll(shifted_k, shift=isocenters[i][2] - reference[2], axis=2) 
 
                 sparse_k = sp.COO(shifted_k)
                 sp.save_npz('kernels_' + identifier[1:] + '_' + str(i) + "_" + str(j) + '.npz', sparse_k)
                 j+=1
 
-    i = 1
+    j = 1
     for file in files:
         k_file = sp.load_npz(patient_path + '\\' + file).todense()
         shifted_k = np.roll(k_file, shift=isocenters[0][0] - reference[0], axis=0)
         shifted_k = np.roll(shifted_k, shift=isocenters[0][1] - reference[1], axis=1)
         shifted_k = np.roll(shifted_k, shift=isocenters[0][2] - reference[2], axis=2)
-            
+
         sparse_k = sp.COO(shifted_k)
-        sp.save_npz('kernels_' + identifier[1:] + '_0_' + str(i) + '.npz', sparse_k)
-        i+=1
+        sp.save_npz('kernels_' + identifier[1:] + '_0_' + str(j) + '.npz', sparse_k)
+        j+=1
     
     csv_file_path = patient_path + '\\' + 'adj_isocenters.csv'
     with open(csv_file_path, mode='w', newline='') as f:
@@ -410,27 +428,91 @@ def develop_dose_cloud(patient_path):
 
     return dose_arr, max_ind
 
+def compute_sc(dose_cloud, pres_dose, min_dose):
+    tumour_mask = 0
+    inside_tumour = 0
+    entire_space = 0
+    for i in range(512):
+        for j in range(512):
+            for k in range(216):
+                if(dose_cloud[i, j, k] >= min_dose):
+                    entire_space += 1
+                if(pres_dose[i, j, k] == min_dose):
+                    tumour_mask += 1
+                    if(dose_cloud[i, j, k] >= min_dose):
+                        inside_tumour += 1
+    coverage = inside_tumour / tumour_mask
+    selectivity = inside_tumour / entire_space
+    conformity = coverage * selectivity
+    return coverage, selectivity, conformity
+
 if __name__ == '__main__':
-    patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\C0006"
+    patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\GK - IsocenterProject Data\C0000"
 
     ptv0 = pd.read_csv(patient_path + '\\' + 'PTV0.csv', header=None)
     ptv0 = ptv0.values.tolist()
-    min_dose = ptv0[0][1]
+    min_dose = float(ptv0[2][1])
+
+    print(f"THE MINIMUM DOSE IS {min_dose}")
     obj_diff = np.inf
     obj_val = 0
-    
-    while(obj_val == 0):
-        dose_arr, max_ind = develop_dose_cloud(patient_path)
-        coords, value, var = find_local_maxima(dose_arr, 2, 20, min_dose)
 
-        num_cluster = elbow(coords,10)
-        clusters = kmeans_get_clusters(coords, num_cluster)
+    pres_dose = build_dense(pd.read_csv(os.path.join(patient_path, "PTV0.csv")))
+    dose_arr, max_ind = develop_dose_cloud(patient_path)
+
+    # x, y, z = max_ind
+    # fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    # cax1 = axs[0].imshow(dose_arr[x, :, :], cmap='viridis')
+    # axs[0].set_title(f'Plane x={x}')
+    # axs[0].axis('off')
+    # fig.colorbar(cax1, ax=axs[0], orientation='vertical', shrink=0.8)
+
+    # cax2 = axs[1].imshow(dose_arr[:, y, :], cmap='viridis')
+    # axs[1].set_title(f'Plane y={y}')
+    # axs[1].axis('off')
+    # fig.colorbar(cax2, ax=axs[1], orientation='vertical', shrink=0.8)
+
+    # cax3 = axs[2].imshow(dose_arr[:, :, z], cmap='viridis')
+    # axs[2].set_title(f'Plane z={z}')
+    # axs[2].axis('off')
+    # fig.colorbar(cax3, ax=axs[2], orientation='vertical', shrink=0.8)
+
+    # output_file = 'dose_cloud_C0006.png'  # Specify the file name and format
+    # fig.savefig(output_file, dpi=300, bbox_inches='tight')
+
+    # plt.show()
+
+    coords, value, var = find_local_maxima(dose_arr, 1, 20, min_dose)
+
+    num_cluster = elbow(coords,10)
+    clusters = kmeans_get_clusters(coords, num_cluster)
+    updated_isocenters = isocenter_set(dose_arr, clusters)
+    shift_kernel(patient_path, updated_isocenters, 'C0000')
+    optimize(patient_path, updated_isocenters, 'C0000')
+
+
+    # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+    # visualize_clusters(dose_arr, max_ind, clusters, isocenters, "C0094")
+    
+    # while(obj_val == 0):
+        # dose_arr, max_ind = develop_dose_cloud(patient_path)
+        # coords, value, var = find_local_maxima(dose_arr, 2, 20, min_dose)
+
+        # num_cluster = elbow(coords,10)
+        # clusters = kmeans_get_clusters(coords, num_cluster)
 
         # If we want to visualize the clusters vs original isocenters
         # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
         # visualize_clusters(dose_arr, max_ind, clusters, isocenters)
 
 
-        updated_isocenters = isocenter_set(dose_arr, clusters)
-        shift_kernel(patient_path, updated_isocenters, 'C0006')
-        obj_val = optimize(patient_path, updated_isocenters, 'C0006')
+        # updated_isocenters = isocenter_set(dose_arr, clusters)
+        # shift_kernel(patient_path, updated_isocenters, 'C0006')
+        # obj_val = optimize(patient_path, updated_isocenters, 'C0006')
+
+    updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
+    coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
+
+    print(f"Coverage: {coverage}")
+    print(f"Selectivity: {selectivity}")
+    print(f"Conformity: {conformity}")
