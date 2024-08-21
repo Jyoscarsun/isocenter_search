@@ -50,12 +50,41 @@ def find_local_maxima(data, order, numMax, min_dose):
         # Sort by variance and select top 3
         top_ind = np.argsort(local_var)[-1*numMax:]
     
-    # Return the coordinates, values, and variance of  coordinates
+    # Return the coordinates, values, and variance of coordinates
     top_coords = coords[top_ind]
     top_val = values[top_ind]
     top_var = local_var[top_ind]
 
     return top_coords, top_val, top_var
+
+def filter_points(data, order, mask, target_num):
+    # Data: the predicted dose information
+    # Order: construct a neighbourhood such that each point picked must not fall within the same neighbourhood
+    # Mask: contain coordinates to all voxels that are within the tumour mask
+    # Target_num: the number of maximum areas that we want returned
+    val_coord_pair = []
+    selected_points = []
+
+    for coord in mask:
+        i, j, k = coord
+        value = data[i, j, k]
+        val_coord_pair.append((value, coord))
+
+    val_coord_pair.sort(reverse=True, key=lambda x: x[0])
+
+    for value, coord in val_coord_pair:
+        close = False
+        for point in selected_points:
+            if (abs(coord[0] - point[0]) < order and abs(coord[1] - point[1]) < order and abs(coord[2] - point[2]) < order):
+                close = True
+                break
+
+        if close == False:
+            selected_points.append(coord)
+        if len(selected_points) >= target_num:
+            break
+
+    return selected_points
 
 def dist(coord1, coord2):
     # Euclidean distance function
@@ -99,10 +128,12 @@ def kmeans_get_clusters(data, num_cluster):
 
 def dbscan_get_clusters(data, eps, min_samples):
     data = np.array(data)
-    clusters = DBSCAN(eps=eps, min_samples=min_samples).fit(data)
-    labels = clusters.labels_
-    clusters = {}
 
+    dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+    dbscan.fit(data)
+    labels = dbscan.labels_
+
+    clusters = {}
     for label in np.unique(labels):
         if label != -1:
             clusters[label] = data[labels == label].tolist()
@@ -117,20 +148,54 @@ def visualize_clusters(dose_arr, max_ind, clusters, isocenters, identifier):
     ax.axis('off')
     fig.colorbar(cax1, ax=ax, orientation='vertical', shrink=0.8)
 
-    colors = ['red', 'green', 'cyan', 'magenta', 'yellow', 'white', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'navy']
+    colors = ['red', 'green', 'cyan', 'magenta', 'yellow', 'white', 'orange', 'purple', 'brown', 
+              'pink', 'gray', 'olive', 'navy', 'lightblue', 'darkgreen', 'salmon', 'coral', 'tan', 'teal',
+            'lime', 'maroon', 'aqua', 'silver', 'gold', 'indigo',
+            'violet', 'beige', 'khaki', 'plum', 'orchid', 'darkred',
+            'skyblue', 'peachpuff', 'wheat', 'lightgreen', 'lightgray',
+            'lavender', 'thistle', 'burlywood', 'chartreuse', 'cyan',
+            'blueviolet', 'tomato', 'powderblue', 'midnightblue', 'darkorange']
     i = 1
-    for cluster in clusters:
+    for cluster in clusters.values():
         cluster_proj = np.array([point[:2] for point in cluster])
         print(cluster_proj)
         if cluster_proj.size > 0:
-            ax.scatter(cluster_proj[:, 1], cluster_proj[:, 0], c=colors[i-1], s=30, label=f"Cluster {i}")
+            ax.scatter(cluster_proj[:, 1], cluster_proj[:, 0], c=colors[i-1], s=2, label=f"Cluster {i}")
         i += 1
 
-    isocenter_proj = np.array([point[:2] for point in isocenters])
-    ax.scatter(isocenter_proj[:, 1], isocenter_proj[:, 0], c='black', s=10, label="Clinical Isocenters")
+    # for cluster in clusters:
+    #     cluster_proj = np.array([point[:2] for point in cluster])
+    #     print(cluster_proj)
+    #     if cluster_proj.size > 0:
+    #         ax.scatter(cluster_proj[:, 1], cluster_proj[:, 0], c=colors[i-1], s=5, label=f"Cluster {i}")
+    #     i += 1
 
-    ax.legend(loc='upper right')
+    isocenter_proj = np.array([point[:2] for point in isocenters])
+    ax.scatter(isocenter_proj[:, 1], isocenter_proj[:, 0], c='black', s=5, label="Clinical Isocenters")
+
+    ax.legend(loc='upper right', prop={'size': 5})
     output_file = 'isocenter_cluster_' + identifier + '.png'  # Specify the file name and format
+    fig.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.show()
+
+def visualize_points(dose_arr, max_ind, points, isocenters, identifier):
+    x, y, z = max_ind
+    fig, ax = plt.subplots(figsize=(15, 5))
+    cax1 = ax.imshow(dose_arr[:, :, z], cmap='viridis')
+    ax.set_title(f'Plane z={z}')
+    ax.axis('off')
+    fig.colorbar(cax1, ax=ax, orientation='vertical', shrink=0.8)
+
+    point_proj = np.array([point[:2] for point in points])
+    print(point_proj)
+    if point_proj.size > 0:
+        ax.scatter(point_proj[:, 1], point_proj[:, 0], c='black', s=1, label="Local max in the tumour mask")
+    
+    isocenter_proj = np.array([point[:2] for point in isocenters])
+    ax.scatter(isocenter_proj[:, 1], isocenter_proj[:, 0], c='red', s=1, label="Clinical Isocenters")
+    
+    ax.legend(loc='upper right')
+    output_file = "local_maxima_" + identifier + '.png'
     fig.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.show()
 
@@ -446,6 +511,15 @@ def compute_sc(dose_cloud, pres_dose, min_dose):
     conformity = coverage * selectivity
     return coverage, selectivity, conformity
 
+def tumour_mask(pres_dose):
+    mask = []
+    for i in range(512):
+        for j in range(512):
+            for k in range(256):
+                if(pres_dose[i, j, k] != 0):
+                    mask.append([i, j, k])
+    return mask
+
 if __name__ == '__main__':
     patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\GK - IsocenterProject Data\C0000"
 
@@ -453,12 +527,53 @@ if __name__ == '__main__':
     ptv0 = ptv0.values.tolist()
     min_dose = float(ptv0[2][1])
 
-    print(f"THE MINIMUM DOSE IS {min_dose}")
-    obj_diff = np.inf
-    obj_val = 0
-
     pres_dose = build_dense(pd.read_csv(os.path.join(patient_path, "PTV0.csv")))
+    i = 1
+    while(os.path.isfile(os.path.join(patient_path, "PTV" + str(i) + ".csv"))):
+        new_mask = build_dense(pd.read_csv(os.path.join(patient_path, "PTV" + str(i) + ".csv")))
+        for i in range(512):
+            for j in range(512):
+                for k in range(256):
+                    pres_dose[i, j, k] += new_mask[i, j, k]
+        i += 1
+
+    # obj_diff = np.inf
+    # obj_val = 0
+    order = 3
+    target_num = 100
+
+    
+    mask = tumour_mask(pres_dose)
     dose_arr, max_ind = develop_dose_cloud(patient_path)
+    points = filter_points(dose_arr, order, mask, target_num)
+    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+    # visualize_points(dose_arr, max_ind, points, isocenters, 'C0094')
+    clusters = dbscan_get_clusters(points, 3, 2)
+    # print(clusters)
+    # visualize_clusters(dose_arr, max_ind, clusters, isocenters, 'C00')
+
+
+    while(len(clusters) < 0.5 * len(isocenters)):
+        order += 1
+        target_num += 10
+        eps = 2*order
+        points = filter_points(dose_arr, order, mask, target_num)
+        clusters = dbscan_get_clusters(points, eps, 2)
+
+    cluster_list = []
+    for key in clusters.keys():
+        cluster_list.append(clusters[key])
+    
+    updated_isocenters = isocenter_set(dose_arr, cluster_list)
+    shift_kernel(patient_path, updated_isocenters, 'C0000')
+    optimize(patient_path, updated_isocenters, 'C0000')
+
+    updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
+    coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
+
+    print(f"Coverage: {coverage}")
+    print(f"Selectivity: {selectivity}")
+    print(f"Conformity: {conformity}")
 
     # x, y, z = max_ind
     # fig, axs = plt.subplots(1, 3, figsize=(15, 5))
@@ -482,13 +597,13 @@ if __name__ == '__main__':
 
     # plt.show()
 
-    coords, value, var = find_local_maxima(dose_arr, 1, 20, min_dose)
+    # coords, value, var = find_local_maxima(dose_arr, 1, 20, min_dose)
 
-    num_cluster = elbow(coords,10)
-    clusters = kmeans_get_clusters(coords, num_cluster)
-    updated_isocenters = isocenter_set(dose_arr, clusters)
-    shift_kernel(patient_path, updated_isocenters, 'C0000')
-    optimize(patient_path, updated_isocenters, 'C0000')
+    # num_cluster = elbow(coords,10)
+    # clusters = kmeans_get_clusters(coords, num_cluster)
+    # updated_isocenters = isocenter_set(dose_arr, clusters)
+    # shift_kernel(patient_path, updated_isocenters, 'C0000')
+    # optimize(patient_path, updated_isocenters, 'C0000')
 
 
     # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
@@ -510,9 +625,9 @@ if __name__ == '__main__':
         # shift_kernel(patient_path, updated_isocenters, 'C0006')
         # obj_val = optimize(patient_path, updated_isocenters, 'C0006')
 
-    updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
-    coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
+    # updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
+    # coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
 
-    print(f"Coverage: {coverage}")
-    print(f"Selectivity: {selectivity}")
-    print(f"Conformity: {conformity}")
+    # print(f"Coverage: {coverage}")
+    # print(f"Selectivity: {selectivity}")
+    # print(f"Conformity: {conformity}")
