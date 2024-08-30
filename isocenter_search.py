@@ -7,6 +7,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
+from scipy.spatial import KDTree
 from sklearn.cluster import KMeans
 from sklearn.cluster import DBSCAN
 import gurobipy as gp
@@ -476,10 +477,13 @@ def develop_dose_cloud(patient_path):
     duration = pd.read_csv(patient_path + '\\' + 'inverse_PTV0.csv', header=None)
 
     for idx, kernel in enumerate(all_kernels):
+        if idx >= 288:
+            break
+        
         if idx == 0:
             dose_kernel = kernel * duration.iloc[0, 0]
         
-        if duration.iloc[idx, 0] == 0.0:
+        if  duration.iloc[idx, 0] == 0.0:
             continue
 
         if idx != 0:
@@ -520,6 +524,40 @@ def tumour_mask(pres_dose):
                     mask.append([i, j, k])
     return mask
 
+def valid_voxels(updated_dose_arr, max_dose, ratio):
+    # This function took the updated dose array, and find out the valid indices
+    valid = []
+    for i in range(512):
+        for j in range(512):
+            for k in range(256):
+                if(updated_dose_arr[i, j, k] >= max_dose * ratio):
+                    valid.append([i, j, k])
+    return valid
+
+def assign_voxels(mask, isocenters):
+    # The indices of the voxels within the tumour mask
+    voxel_ind = np.array(mask)
+    # Build a KDTree with the isocenter coordinates
+    isocenter_tree = KDTree(isocenters)
+    # Query the tree with voxel coordinates to find the nearest isocenter
+    distances, nearest_isocenter = isocenter_tree.query(voxel_ind)
+    r = np.zeros(len(isocenters)) # Radius of influence of each isocenter
+    result = {}
+
+    for i, ind in enumerate(voxel_ind):
+        isocenter_ind = nearest_isocenter[i]
+        distance = distances[i]
+
+        if distance > r[isocenter_ind]:
+            r[isocenter_ind] = distance
+
+        result[tuple(ind)] = isocenter_ind
+    # Return variables
+    # Result is a 3D array with values at each location being the closest isocenter
+    # r is a array with values at each location being the radius of influence for that isocenter
+    return result, r
+    
+
 if __name__ == '__main__':
     patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\GK - IsocenterProject Data\C0000"
 
@@ -527,6 +565,7 @@ if __name__ == '__main__':
     ptv0 = ptv0.values.tolist()
     min_dose = float(ptv0[2][1])
 
+    # Build the prescription dose from multiple tumour kernels
     pres_dose = build_dense(pd.read_csv(os.path.join(patient_path, "PTV0.csv")))
     i = 1
     while(os.path.isfile(os.path.join(patient_path, "PTV" + str(i) + ".csv"))):
@@ -537,28 +576,26 @@ if __name__ == '__main__':
                     pres_dose[i, j, k] += new_mask[i, j, k]
         i += 1
 
-    # obj_diff = np.inf
-    # obj_val = 0
     order = 3
     target_num = 100
 
-    
     mask = tumour_mask(pres_dose)
     dose_arr, max_ind = develop_dose_cloud(patient_path)
     points = filter_points(dose_arr, order, mask, target_num)
-    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
-    # visualize_points(dose_arr, max_ind, points, isocenters, 'C0094')
     clusters = dbscan_get_clusters(points, 3, 2)
+    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+
+    # visualize_points(dose_arr, max_ind, points, isocenters, 'C0094')
     # print(clusters)
     # visualize_clusters(dose_arr, max_ind, clusters, isocenters, 'C00')
 
 
-    while(len(clusters) < 0.5 * len(isocenters)):
-        order += 1
-        target_num += 10
-        eps = 2*order
-        points = filter_points(dose_arr, order, mask, target_num)
-        clusters = dbscan_get_clusters(points, eps, 2)
+    # while(len(clusters) < 0.5 * len(isocenters)):
+    #     order += 1
+    #     target_num += 10
+    #     eps = 2*order
+    #     points = filter_points(dose_arr, order, mask, target_num)
+    #     clusters = dbscan_get_clusters(points, eps, 2)
 
     cluster_list = []
     for key in clusters.keys():
@@ -567,6 +604,8 @@ if __name__ == '__main__':
     updated_isocenters = isocenter_set(dose_arr, cluster_list)
     shift_kernel(patient_path, updated_isocenters, 'C0000')
     optimize(patient_path, updated_isocenters, 'C0000')
+    # shift_kernel(patient_path, isocenters, 'C0019')
+    # optimize(patient_path, isocenters, 'C0019')
 
     updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
     coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
