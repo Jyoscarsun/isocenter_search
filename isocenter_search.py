@@ -476,10 +476,7 @@ def develop_dose_cloud(patient_path):
     # Load the file containing time duration for each kernel
     duration = pd.read_csv(patient_path + '\\' + 'inverse_PTV0.csv', header=None)
 
-    for idx, kernel in enumerate(all_kernels):
-        if idx >= 288:
-            break
-        
+    for idx, kernel in enumerate(all_kernels):        
         if idx == 0:
             dose_kernel = kernel * duration.iloc[0, 0]
         
@@ -498,22 +495,21 @@ def develop_dose_cloud(patient_path):
     return dose_arr, max_ind
 
 def compute_sc(dose_cloud, pres_dose, min_dose):
-    tumour_mask = 0
-    inside_tumour = 0
-    entire_space = 0
+    tm = 0
+    it = 0
+    es = 0
     for i in range(512):
         for j in range(512):
             for k in range(216):
                 if(dose_cloud[i, j, k] >= min_dose):
-                    entire_space += 1
+                    es += 1
                 if(pres_dose[i, j, k] == min_dose):
-                    tumour_mask += 1
+                    tm += 1
                     if(dose_cloud[i, j, k] >= min_dose):
-                        inside_tumour += 1
-    coverage = inside_tumour / tumour_mask
-    selectivity = inside_tumour / entire_space
-    conformity = coverage * selectivity
-    return coverage, selectivity, conformity
+                        it += 1
+    cov, sel = it/tm, it/es
+    con = cov*sel
+    return cov, sel, con
 
 def tumour_mask(pres_dose):
     mask = []
@@ -523,16 +519,6 @@ def tumour_mask(pres_dose):
                 if(pres_dose[i, j, k] != 0):
                     mask.append([i, j, k])
     return mask
-
-def valid_voxels(updated_dose_arr, max_dose, ratio):
-    # This function took the updated dose array, and find out the valid indices
-    valid = []
-    for i in range(512):
-        for j in range(512):
-            for k in range(256):
-                if(updated_dose_arr[i, j, k] >= max_dose * ratio):
-                    valid.append([i, j, k])
-    return valid
 
 def assign_voxels(mask, isocenters):
     # The indices of the voxels within the tumour mask
@@ -557,9 +543,97 @@ def assign_voxels(mask, isocenters):
     # r is a array with values at each location being the radius of influence for that isocenter
     return result, r
     
+def shift_isocenter(isocenters, r, dose_cloud, pres_dose, min_dose, cov, sel, con, max_ind):
+    """
+    The function that takes in isocenters and their respective radius, and return the new set of isocenters
+    isocenters: the previous set of isocenters that requires shifting
+    r: sphere of influence for each isocenter. Compute relevant metrics within each sphere and shift isocenter accordingly
+    """
+
+    """
+    Rationale behind isocenter shift: 
+    Only move the isocenters in regions that perform worse in comparison to the overall tumour space metrics
+    If the regional selectivity is worse off, move the isocenter closer to indices of max dosage (assumed to be the center of entire tumour space)
+    If the regional coverage is worse off, move the other isocenters closer to the region but only if those isocenter regions are also performing worse
+    """
+    metrics = []
+
+    for i in range(len(isocenters)):
+        cx, cy, cz = isocenters[i][0], isocenters[i][1], isocenters[i][2]
+        x_min = max(0, cx-r[i])
+        x_max = min(511, cx+r[i])
+        y_min = max(0, cy-r[i])
+        y_max = min(511, cy+r[i])
+        z_min = max(0, cz-r[i])
+        z_max = min(255, cz+r[i])
+
+        x, y, z = np.ogrid[x_min:x_max+1, y_min:y_max+1, z_min:z_max+1]
+        dist_squared = (z-cz) ** 2 + (y-cy)**2 + (x-cx)**2
+        mask = dist_squared <= r[i]**2
+
+        sphere = (np.array(np.where(mask)).T + [z_min, y_min, x_min]).tolist()
+
+        tm = 0 # Num of voxels within tumour mask
+        it = 0 # Num of voxels within tumour mask that has dosage over min
+        es = 0 # Num of voxels within entire sphere that has dosage over min
+        for coord in sphere:
+            if(dose_cloud[coord[0], coord[1], coord[2]] >= min_dose):
+                es += 1
+            if(pres_dose[coord[0], coord[1], coord[2]] == min_dose):
+                tm += 1
+                if(dose_cloud[coord[0], coord[1], coord[2]] >= min_dose):
+                    it += 1
+        cov, sel = it/tm, it/es
+        con = cov*sel
+        metrics.append([cov, sel, con])
+
+    regions = []
+    for i in range(len(metrics)):
+        if(metrics[i][2] < con):
+            regions.append(i)
+    
+    for region in regions:
+        if(metrics[region][0] < cov): # Coverage is performing worse
+            for neighbour in regions:
+                if neighbour != region and metrics[neighbour][0] < cov:
+                    x_diff, y_diff, z_diff = isocenters[neighbour][0] - isocenters[region][0], isocenters[neighbour][1] - isocenters[region][1], isocenters[neighbour][2] - isocenters[region][2]
+                    abs_x = abs(x_diff)
+                    abs_y = abs(y_diff)
+                    abs_z = abs(z_diff)
+                    max_mag = max(abs_x, abs_y, abs_z)
+
+                    def scale(mag, max_mag):
+                        if max_mag == 0:
+                            return 0
+                        return int(1 + 2 * (mag/max_mag))
+            
+                    isocenters[neighbour][0] += scale(x_diff, max_mag)
+                    isocenters[neighbour][1] += scale(y_diff, max_mag)
+                    isocenters[neighbour][2] += scale(z_diff, max_mag)
+
+        elif(metrics[region][1] < sel): # Selectivity is performing worse
+            x_diff = max_ind[0] - isocenters[region][0]
+            y_diff = max_ind[1] - isocenters[region][1]
+            z_diff = max_ind[2] - isocenters[region][2]
+
+            abs_x = abs(x_diff)
+            abs_y = abs(y_diff)
+            abs_z = abs(z_diff)
+            max_mag = max(abs_x, abs_y, abs_z)
+
+            def scale(mag, max_mag):
+                if max_mag == 0:
+                    return 0
+                return int(1 + 4 * (mag/max_mag))
+            
+            isocenters[region][0] += scale(x_diff, max_mag)
+            isocenters[region][1] += scale(y_diff, max_mag)
+            isocenters[region][2] += scale(z_diff, max_mag)
+    return isocenters
+
 
 if __name__ == '__main__':
-    patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\GK - IsocenterProject Data\C0000"
+    patient_path = "D:\Summer 24\Research Materials\Gamma Knife Code\GK - IsocenterProject Data\C0006"
 
     ptv0 = pd.read_csv(patient_path + '\\' + 'PTV0.csv', header=None)
     ptv0 = ptv0.values.tolist()
@@ -581,92 +655,55 @@ if __name__ == '__main__':
 
     mask = tumour_mask(pres_dose)
     dose_arr, max_ind = develop_dose_cloud(patient_path)
+    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
+    # Clinical coverage, selectivity, and conformity to compare later trials to
+    clinical_cov, clinical_sel, clinical_con = compute_sc(dose_arr, pres_dose, min_dose)    
+    
+
     points = filter_points(dose_arr, order, mask, target_num)
     clusters = dbscan_get_clusters(points, 3, 2)
-    isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
-
-    # visualize_points(dose_arr, max_ind, points, isocenters, 'C0094')
-    # print(clusters)
-    # visualize_clusters(dose_arr, max_ind, clusters, isocenters, 'C00')
-
-
-    # while(len(clusters) < 0.5 * len(isocenters)):
-    #     order += 1
-    #     target_num += 10
-    #     eps = 2*order
-    #     points = filter_points(dose_arr, order, mask, target_num)
-    #     clusters = dbscan_get_clusters(points, eps, 2)
-
     cluster_list = []
     for key in clusters.keys():
         cluster_list.append(clusters[key])
     
     updated_isocenters = isocenter_set(dose_arr, cluster_list)
-    shift_kernel(patient_path, updated_isocenters, 'C0000')
-    optimize(patient_path, updated_isocenters, 'C0000')
-    # shift_kernel(patient_path, isocenters, 'C0019')
-    # optimize(patient_path, isocenters, 'C0019')
-
+    shift_kernel(patient_path, updated_isocenters, 'C0006')
+    optimize(patient_path, updated_isocenters, 'C0006')
     updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
-    coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
+    cov, sel, con = compute_sc(updated_dose_arr, pres_dose, min_dose)
+    best_cov, best_sel, best_con = clinical_cov, clinical_sel, clinical_con # Best coverage, selectivity, and conformity that all belongs 
 
-    print(f"Coverage: {coverage}")
-    print(f"Selectivity: {selectivity}")
-    print(f"Conformity: {conformity}")
+    # Conditions that we want fulfilled when stopping
+    cond1 = cov >= 0.95
+    cond2 = cov >= clinical_cov
+    cond3 = sel >= clinical_sel
+    cond4 = con >= clinical_con
+    cond5 = cov >= best_cov
+    cond6 = sel >= best_sel
+    cond7 = con >= best_con
 
-    # x, y, z = max_ind
-    # fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    # cax1 = axs[0].imshow(dose_arr[x, :, :], cmap='viridis')
-    # axs[0].set_title(f'Plane x={x}')
-    # axs[0].axis('off')
-    # fig.colorbar(cax1, ax=axs[0], orientation='vertical', shrink=0.8)
+    cond = [cond1, cond2, cond3, cond4, cond5, cond6, cond7]
 
-    # cax2 = axs[1].imshow(dose_arr[:, y, :], cmap='viridis')
-    # axs[1].set_title(f'Plane y={y}')
-    # axs[1].axis('off')
-    # fig.colorbar(cax2, ax=axs[1], orientation='vertical', shrink=0.8)
+    # The stopping condition for this while loop is that there are at least 4 conditions out of 7 that are true
+    while(sum(cond) < 4):
+        result, r = assign_voxels(mask, isocenters)
+        updated_isocenters = shift_isocenter(updated_isocenters, r, updated_dose_arr, mask, min_dose, cov, sel, con, max_ind)
+        shift_kernel(patient_path, updated_isocenters, 'C0006')
+        optimize(patient_path, updated_isocenters, 'C0006')
+        updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
+        cov, sel, con = compute_sc(updated_dose_arr, pres_dose, min_dose)
+        if(con > best_con):
+            best_cov = cov
+            best_sel = sel
+            best_con = con
 
-    # cax3 = axs[2].imshow(dose_arr[:, :, z], cmap='viridis')
-    # axs[2].set_title(f'Plane z={z}')
-    # axs[2].axis('off')
-    # fig.colorbar(cax3, ax=axs[2], orientation='vertical', shrink=0.8)
+        cond1 = cov >= 0.95
+        cond2 = cov >= clinical_cov
+        cond3 = sel >= clinical_sel
+        cond4 = con >= clinical_con
+        cond5 = cov >= best_cov
+        cond6 = sel >= best_sel
+        cond7 = con >= best_con
 
-    # output_file = 'dose_cloud_C0006.png'  # Specify the file name and format
-    # fig.savefig(output_file, dpi=300, bbox_inches='tight')
-
-    # plt.show()
-
-    # coords, value, var = find_local_maxima(dose_arr, 1, 20, min_dose)
-
-    # num_cluster = elbow(coords,10)
-    # clusters = kmeans_get_clusters(coords, num_cluster)
-    # updated_isocenters = isocenter_set(dose_arr, clusters)
-    # shift_kernel(patient_path, updated_isocenters, 'C0000')
-    # optimize(patient_path, updated_isocenters, 'C0000')
-
-
-    # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
-    # visualize_clusters(dose_arr, max_ind, clusters, isocenters, "C0094")
-    
-    # while(obj_val == 0):
-        # dose_arr, max_ind = develop_dose_cloud(patient_path)
-        # coords, value, var = find_local_maxima(dose_arr, 2, 20, min_dose)
-
-        # num_cluster = elbow(coords,10)
-        # clusters = kmeans_get_clusters(coords, num_cluster)
-
-        # If we want to visualize the clusters vs original isocenters
-        # isocenters = extract_isocenters(patient_path + '\\' + 'adj_isocenters.csv')
-        # visualize_clusters(dose_arr, max_ind, clusters, isocenters)
-
-
-        # updated_isocenters = isocenter_set(dose_arr, clusters)
-        # shift_kernel(patient_path, updated_isocenters, 'C0006')
-        # obj_val = optimize(patient_path, updated_isocenters, 'C0006')
-
-    # updated_dose_arr, max_ind = develop_dose_cloud(patient_path)
-    # coverage, selectivity, conformity = compute_sc(updated_dose_arr, pres_dose, min_dose)
-
-    # print(f"Coverage: {coverage}")
-    # print(f"Selectivity: {selectivity}")
-    # print(f"Conformity: {conformity}")
+        cond = [cond1, cond2, cond3, cond4, cond5, cond6, cond7]
+        print(f"{sum(cond)} out of 7 conditions are true")
